@@ -2,6 +2,10 @@
 
 <font color='red'>当前更新：分布式训练，DDP(DistributedDataParallel)</font>
 
+下载链接 https://github.com/liuzhaoo/Pytorch-API-and-Tutorials-CN/releases/tag/v0.01
+
+也可直接下载上方pdf文件
+
 
 
 <font color='orang'>本文档是对Pytorch官方文档和教材学习及查阅过程中的笔记，不仅对原文档做了便于理解的翻译，还对一些重要的部分进行了解释说明。</font>
