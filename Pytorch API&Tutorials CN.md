@@ -190,7 +190,96 @@ cat 的反操作:在指定维度将tensor分为 chunks个tensor,若该维度的�
 
 
 
-## torch.nn
+## TORCH.NN
+
+### Normalization Layers
+
+#### nn.SyncBatchNorm
+
+在N维的输入（一个具有额外的通道维度的N-2 d的mini-batch）中应用Batch Normalization。在多GPU时使用。
+
+> <font color='red'>CLASS</font> `torch.nn.SyncBatchNorm`(*num_features: int*, *eps: float = 1e-05*, *momentum: float = 0.1*, *affine: bool = True*,				   	         *track_running_stats: bool = True*, *process_group: Optional[Any] = None*)
+
+计算公式  ：
+$$
+y = \frac{x - E（x）}{\sqrt{Var(x)+\epsilon}}\times\gamma + \beta
+$$
+均值和标准差是在同一进程组里所有mini-batch的每个维度上计算得来的，$\gamma$和$\beta$是大小为C的向量。默认情况下，$\gamma$在U(0，1)上取样，$\beta$ 为0。标准差通过有偏估计量计算，等价于`torch.var(input, unbiased=False)`。
+
+同样在默认情况下，在训练期间，这一层将继续运行其计算的平均值和方差的估计值，然后在评估期间使用这些估计值进行归一化。运行估计保持默认`momentum`为0.1。
+
+如果`track_running_stats`设为False，这一层就不会再保留运行的估计值，而在评估期间会使用批处理统计信息。
+
+注意，这里的`momentum`与优化器中和卷积层中的动量不同。
+
+由于此处的BN是对C维中的每一个通道进行的，计算N个Batch中的（N,+）切片统计量。通常称之为容量Batch Normalization或时空Batch Normalization。
+
+当前 [`SyncBatchNorm`](https://pytorch.org/docs/stable/generated/torch.nn.SyncBatchNorm.html#torch.nn.SyncBatchNorm) 只支持每个进程单个GPU的 `DistributedDataParallel` (DDP) ，在使用DDP包装网络之前使用[torch.nn.SyncBatchNorm.convert_sync_batchnorm()](https://pytorch.org/docs/stable/generated/torch.nn.SyncBatchNorm.html#torch.nn.SyncBatchNorm.convert_sync_batchnorm)来将BN层（1d/2d/3d）转换为`SyncBatchNorm`
+
+**参数**
+
+- **num_features** -- C (也就是通道数)
+- **eps** -- 为数值稳定性而在分母上增加的值（$\epsilon$），默认是1e-5
+- **momentum** -- 用于running_mean和running_var计算的值。累积移动平均(即简单平均)可设为None，默认为0.1
+- **affine** -- 布尔值，决定该模块是否有可学习的仿射参数。默认为True。
+- **track_running_stats** -- 布尔值，为True时，此模块跟踪运行时的平均和方差。为False则不跟踪这些统计量，如果运行的平均值和方差都为None，则在训练和eval模式中使用批处理统计信息。
+- **process_group** -- 状态同步在每个进程组中内部进行。
+
+**shape**
+
+- 输入：(N,C,+)
+- 输出：(N,C,+)
+
+
+
+实例：
+
+```python
+>>> # With Learnable Parameters
+>>> m = nn.SyncBatchNorm(100)
+>>> # creating process group (optional)
+>>> # process_ids is a list of int identifying rank ids.
+>>> process_group = torch.distributed.new_group(process_ids)
+>>> # Without Learnable Parameters
+>>> m = nn.BatchNorm3d(100, affine=False, process_group=process_group)
+>>> input = torch.randn(20, 100, 35, 45, 10)
+>>> output = m(input)
+
+>>> # network is nn.BatchNorm layer
+>>> sync_bn_network = nn.SyncBatchNorm.convert_sync_batchnorm(network, process_group)
+>>> # only single gpu per process is currently supported
+>>> ddp_sync_bn_network = torch.nn.parallel.DistributedDataParallel(
+>>>                         sync_bn_network,
+>>>                         device_ids=[args.local_rank],
+>>>                         output_device=args.local_rank)
+```
+
+>  对象的方法  `convert_sync_batchnorm`(*module*, *process_group=None*)
+
+将模型中的BN层都转换为 [`torch.nn.SyncBatchNorm`](https://pytorch.org/docs/stable/generated/torch.nn.SyncBatchNorm.html#torch.nn.SyncBatchNorm) 的函数
+
+**参数**
+
+- **module**(([*nn.Module*](https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module)) -- 包含BN层的模型
+- **process_group** -- 进行同步的进程组，默认为整个组
+
+**返回值**
+
+​		包含转换过的BN层的原始模型。
+
+示例：
+
+```python
+>>> # Network with nn.BatchNorm layer
+>>> module = torch.nn.Sequential(
+>>>            torch.nn.Linear(20, 100),
+>>>            torch.nn.BatchNorm1d(100),
+>>>          ).cuda()
+>>> # creating process group (optional)
+>>> # process_ids is a list of int identifying rank ids.
+>>> process_group = torch.distributed.new_group(process_ids)
+>>> sync_bn_module = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module, process_group)
+```
 
 ### DataParallel Layers (multi-GPU, distributed)
 
@@ -204,7 +293,7 @@ cat 的反操作:在指定维度将tensor分为 chunks个tensor,若该维度的�
 
 - **module**([*Module*](https://pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module)) -- 需要并行的模块（通常是整个模型）
 - **device_ids**(*list of python:int* *or* [*torch.device*](https://pytorch.org/docs/stable/tensor_attributes.html#torch.torch.device)) -- CUDA 设备（默认为所有设备）
-- output_device([*int*](https://docs.python.org/3/library/functions.html#int) *or* [*torch.device*](https://pytorch.org/docs/stable/tensor_attributes.html#torch.torch.device)) -- 外部设备（一般用不到）
+- **output_device**([*int*](https://docs.python.org/3/library/functions.html#int) *or* [*torch.device*](https://pytorch.org/docs/stable/tensor_attributes.html#torch.torch.device)) -- 外部设备（一般用不到）
 
 **例子**
 
@@ -763,7 +852,64 @@ dist.all_reduce_multigpu(tensor_list)
 
 
 
+## TORCH.UTILS.DATA
 
+[`torch.utils.data.DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader)类是PyTorch数据加载功能的核心，它表示在数据集上的一个Python迭代，支持
+
+- [map-style and iterable-style datasets](#数据集类型),
+- [customizing data loading order](https://pytorch.org/docs/stable/data.html#data-loading-order-and-sampler),
+- [automatic batching](https://pytorch.org/docs/stable/data.html#loading-batched-and-non-batched-data),
+- [single- and multi-process data loading](https://pytorch.org/docs/stable/data.html#single-and-multi-process-data-loading),
+- [automatic memory pinning](https://pytorch.org/docs/stable/data.html#memory-pinning).
+
+这些选项是由`DataLoader`的构造函数参数配置的：
+
+```python
+DataLoader(dataset, batch_size=1, shuffle=False, sampler=None,
+           batch_sampler=None, num_workers=0, collate_fn=None,
+           pin_memory=False, drop_last=False, timeout=0,
+           worker_init_fn=None)
+```
+
+以下各节将详细描述这些选项的效果和用法。
+
+### 数据集类型
+
+`DataLoader`构造函数最重要的参数是`dataset`，它指示要加载数据的数据集对象。PyTorch支持两种不同类型的数据集：
+
+- `map-style datasets`
+
+  一种映射型的数据集，使用`__getitem__()` 和 `__len__()`协议，表示一种从indices/keys（可能为非整型）到数据样本的映射
+
+  比如有这样一个数据集，当访问 `dataset[idx]`时，可以从磁盘上的文件夹读取到第`idx`个图像以及与它相关的标签。
+
+  参考`Dataset`以学习更多细节
+
+- `iterable-style datasets`
+
+  这类数据集是 [`IterableDataset`](https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset) 的子类的一个实例，使用 `__iter__()`协议，表示可在数据样本上迭代。这种类型的数据集特别适合于很难甚至无法进行随机读取，以及BatchSize的大小取决于获取的数据的情况。
+
+  比如调用 `iter(dataset)`时，可以返回从数据库、远程服务器读取的数据流，甚至实时生成的日志。
+
+  参考 [`IterableDataset`](https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset) 以学习更多细节
+
+- ***NOTE***
+
+  在使用 [multi-process data loading](https://pytorch.org/docs/stable/data.html#multi-process-data-loading)的情况下使用[`IterableDataset`](https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset)时，由于在每个工作进程上都复制相同的数据集对象，因此必须对副本进行不同的配置，以避免数据重复。
+
+### 数据加载类型以及 [Sampler](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler)
+
+对于[iterable-style](#iterable-style datasets)数据集，数据加载顺序完全由用户定义的iterable控制，这使得更加容易实现块读取和动态batch size (例如，每次分批取样)。
+
+本节剩下的部分是关于[map-style]()数据集的， [torch.utils.data.Sampler](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler) 类用于指定数据加载时使用的索引/键的顺序。 这些类表示数据集索引上的可迭代对象（迭代索引）。例如，在常见的随机梯度下降（SGD）的情况下，一个[Sample]()r可以随机排列一列索引值并且每次产生一个或少量的索引来进行mini-batchSGD
+
+根据`DataLoader`类的`shuffle`参数可以自动构造一个 `sequential` 或 `shuffled` 的`sampler`。另外，用户也可以使用`sampler`参数来指定一个自定义的的[Sampler]()对象，每次它都会产生下一个要获取的 index/key。
+
+每次生成一个 batch indices 列表的自定义的[Sampler]()可以作为`batch_sampler`参数传入`DataLoader`类。还可以通过`batch_size`和`drop_last`参数启用自动批处理(Automatic batching)。下一节会给出更多细节
+
+***NOTE***
+
+`sampler`和`batch_sample`r都不兼容[iterable-style](#iterable-style datasets)的数据集，因为这样的数据集没有键或索引的概念。
 
 # PART 2   TUTORIALS
 
