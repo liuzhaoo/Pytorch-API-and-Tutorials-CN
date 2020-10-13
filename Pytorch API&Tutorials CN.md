@@ -2,7 +2,9 @@
 
 <font color='red'>Pytorch版本：1.6.0</font>
 
-<font color='red'>当前更新：分布式训练，DDP(DistributedDataParallel)</font>
+<font color='red'>上版更新：nn.SyncBatchNorm</font>
+
+<font color='red'>当前更新：nn.utils.data</font>
 
 
 
@@ -897,7 +899,7 @@ DataLoader(dataset, batch_size=1, shuffle=False, sampler=None,
 
   在使用 [multi-process data loading](https://pytorch.org/docs/stable/data.html#multi-process-data-loading)的情况下使用[`IterableDataset`](https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset)时，由于在每个工作进程上都复制相同的数据集对象，因此必须对副本进行不同的配置，以避免数据重复。
 
-### 数据加载类型以及 [Sampler](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler)
+### 数据加顺序以及 [Sampler](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler)
 
 对于[iterable-style](#iterable-style datasets)数据集，数据加载顺序完全由用户定义的iterable控制，这使得更加容易实现块读取和动态batch size (例如，每次分批取样)。
 
@@ -909,7 +911,321 @@ DataLoader(dataset, batch_size=1, shuffle=False, sampler=None,
 
 ***NOTE***
 
-`sampler`和`batch_sample`r都不兼容[iterable-style](#iterable-style datasets)的数据集，因为这样的数据集没有键或索引的概念。
+`sampler`和`batch_sampler`都不兼容[iterable-style](#iterable-style datasets)的数据集，因为这样的数据集没有键或索引的概念。
+
+### 加载分批和未分批的数据
+
+`DataLoader`支持通过参数`batch_size`、`drop_last`和`batch_sampler`自动将获取的单个数据样本排序成批。
+
+#### 自动成批
+
+这是最常见的情况，对应于获取一小批数据并将它们整理成分批的样本，此样本的第一维是Batch维度。
+
+如果`batch_size`（默认是1）的值不是`None`，数据加载器会生成成批的样本，而不是单个样本。`batch_size`和`drop_last`参数用于指定数据加载器如何获得成批的数据集keys。对于[map-style]()的数据集，用户可以选择`batch_sampler`，它会每次生成一个键列表。
+
+***NOTE***
+
+- `batch_size`和`drop_last`参数本质上是用来从sampler参数中构造batch_sampler的。对于[map-style]()的数据集，sampler可以由用户提供，也可以基于`shuffle`参数构造。
+- 在使用多进程从[iterable-style](#iterable-style datasets)数据集中获取数据时，`drop_last`参数会删除每个worker的数据集副本的最后一个非完整批。
+
+当在sampler中使用indices获取一个列表的样本时，作为`collate_fn`参数传递的函数（这个函数作为参数传进类中）会将这个列表的样本排列成批。
+
+#### 禁用自动成批
+
+在某些情况下，用户可能希望在数据集代码中手动处理批，或者只是加载单个示例。比如直接加载成批的数据更省力（算力）（例如，批量读取数据库或连续读取内存块），或者批大小是依赖于数据的，或者程序是设计来处理单个样本的。在这些场景下，最好不要使用自动批处理(其中collate_fn用于对样本进行排序)，而是让数据加载器直接返回数据集对象的每个成员。
+
+当`batch_size`和`batch_sampler`都为None (`batch_sampler`的默认值已经为None)时，自动批处理将被禁用。此时使用作为`collate_fn`参数传递的函数来处理从数据集获得的每个示例。这时，这个函数只是将Numpy数组转换维PyTorch的Tensor，其他保持不变。
+
+#### `collate_fn`的作用
+
+在禁用和不禁用自动批处理时，`collate_fn`的作用是不同的。
+
+**禁用批处理时** `collate_fn`调用每个单独的数据样本，输出是从数据加载器迭代器中产生的。这时，这个函数只是将Numpy数组转换维PyTorch的Tensor
+
+**不禁用时**  `collate_fn`每次调用一个列表里的数据样本，它需要将输入样本整理为批，以便从数据加载器迭代器生成。本节的剩余部分描述`collate_fn`在这种情况下的行为。
+
+例如，如果每个数据样本由一个3通道图像和一个完整的类标签组成，也就是说数据集的每个元素都返回一个元组（`image，class_index`），默认的`collate_fn`会将包含这样的元组的列表整理成一个批处理过的图像tensor的单独的元组以及一个批处理过的类标签Tensor。具体来说，`collate_fn`有以下特点：
+
+- 它总是添加一个新维度作为批处理维度。
+- 它自动将NumPy数组和Python数值转换为PyTorch张量。
+- 它保留了数据结构，例如，如果每个样本是一个字典，它输出具有相同键集但批处理过的张量作为值的字典(如果值不能转换成张量，则值为列表)
+
+用户可以使用自定义的`collate_fn`来实现自定义批处理，例如沿第一个维度以外的维度排序、各种长度的填充序列或添加对自定义数据类型的支持。
+
+### 单进程和多进程加载数据
+
+`DataLoader`默认使用单进程加载数据。
+
+在一个Python进程中，全局解释器锁[Global Interpreter Lock (GIL)](https://wiki.python.org/moin/GlobalInterpreterLock)防止跨线程完全并行化Python代码。为避免数据加载阻塞计算代码，PyTorch提供了一个简单的开关来执行多进程数据加载，只需将参数num_workers设置为一个正整数。
+
+#### 单进程加载数据（默认）
+
+在此模式下，在初始化DataLoader的进程中程中完成数据获取。因此，数据加载可能会阻塞计算。然而，当用于进程间数据共享的资源（如共享内存、文件描述符)有限（不多）时，或者整个数据集很小并且可以完全加载到内存中时，此模式是首选方式。此外，单进程加载通常会显示更多可读的错误跟踪，因此对调试很有用。
+
+#### 多进程加载数据
+
+将参数 `num_workers`设置为一个正整数会开启具有指定数量的数据加载工作进程的多进程数据加载模式。
+
+在此模式下，每当创建一个`DataLoader`的迭代器时(例如，当调用`enumerate(dataLoader)`时)，会创建 `num_workers`个工作进程。此时，`dataset`，`collate_fn`和`worker_init_fn`被传递给每个worker，它们被用于初始化和获取数据。这意味着数据集访问和它的内部IO，以及转换(包括collate_fn)都在工作进程中运行。
+
+[`torch.utils.data.get_worker_info()`](https://pytorch.org/docs/stable/data.html#torch.utils.data.get_worker_info)返回工作进程中的各种有用信息(包括工作进程id、数据集副本、初始种子等)，并在主进程中返回None。用户可以在数据集代码和/或worker_init_fn中使用此函数来单独配置每个数据集副本，并确定代码是否在工作进程中运行.例如，这在对数据集分区时特别有用。
+
+对于[map-style]()的数据集，主进程使用`sampler`生成索引并将它们发送给workers。因此，随机shuffle 是在主进程中完成的，通过分配指标来引导加载。
+
+对于[iterable-style](#iterable-style datasets)数据集，由于每个工作进程都获得了数据集对象的副本，单纯的多进程加载通常会导致重复的数据。使用`torch.utils.data.get_worker_info()`和/或worker_init_fn，用户可以独立配置每个副本。(参见IterableDataset文档了解如何实现这一点。)出于类似的原因，在多进程加载中，`drop_last`参数会删除每个worker的 iterable-style数据集副本的最后一批非完整数据。
+
+***WARNING***
+
+通常不建议在多进程加载时返回CUDA张量，因为在多进程中使用CUDA和共享CUDA张量有很多微妙之处。相反，我们建议使用自动内存固定(例如，设置`pin_memory=True`)，这可以使数据快速传输到支持cuda的gpu。
+
+#### 不同系统的配置
+
+- 在Unix中，`fork()`是默认的开始多进程的方法。使用`fork()`，子进程通常可以通过克隆的地址空间直接访问数据集和Python参数函数。
+- 对于Windows，`spawn()`是默认的开始多进程的方法。使用`spawn()`，另一个解释器会被启动，它运行main script，然后是通过pickle序列化接收数据集、collate_fn和其他参数的内部辅助函数。
+
+这个单独的序列化意味着你应该采取两个步骤，以确保兼容Windows，同时使用多进程数据加载：
+
+- 使用 `if __name__ == '__main__':`包装主函数
+- 确保任何自定义的`collate_fn, worker_init_fn`或数据集代码被声明为顶层定义，在其余的`__main__`检查之外。这确保了它们在辅助进程中可用。
+
+#### 多进程数据加载的随机性
+
+默认情况下，每个worker都将其PyTorch种子设置为`base_seed + worker_id`，其中`base_seed`是主进程使用其RNG生成的长线程(因此，强制使用RNG状态)。然而，其他库的种子可能会在初始化worker时被复制(例如NumPy)，导致每个worker返回相同的随机数。
+
+在`worker_init_fn`中，您可以使用`torch.util .data.get_worker_info()`或 [`torch.initial_seed()`](https://pytorch.org/docs/stable/generated/torch.initial_seed.html#torch.initial_seed)访问每个worker的PyTorch种子集。并使用它在数据加载之前为其他库设置种子。
+
+### Memory Pinning
+
+主机到GPU的拷贝在来自固定(页面锁定)内存时要快得多。
+
+在加载数据时，将`pin_memory=True`传递给`DataLoader`会自动将获取的数据张量放到固定的内存中，从而使数据更快地传输到支持cuda的gpu。
+
+默认的内存固定逻辑只能识别张量、映射和包含张量的迭代。默认情况下，如果pinning logic看到一个自定义类型的批(如果使用collate_fn返回一个自定义类型的批),或者如果这个批的每个元素都是自定义类型, pinning logic 不会识别出他们,它会返回这批没有固定的内存(或这些元素)。要为自定义的批处理或数据类型启用Memory Pinning，请在自定义类型上定义`pin_memory()`方法。
+
+
+
+> <font color='red'>CLASS</font> `torch.utils.data.DataLoader`(*dataset*, *batch_size=1*, *shuffle=False*, *sampler=None*, *batch_sampler=None*, 				*num_workers=0*, *collate_fn=None*, *pin_memory=False*, *drop_last=False*, *timeout=0*, *worker_init_fn=None*, 				*multiprocessing_context=None*, *generator=None*)
+
+数据据加载程序。组合dataset 和 sampler，并为给定的数据集提供可迭代性。
+
+`DataLoader`支持`map-style`和`iterable-style` 的数据集，具有单进程或多进程加载、自定义加载顺序和可选的自动批处理(排序)和内存固定。
+
+**参数**
+
+- **dataset** ([*Dataset*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Dataset)) – 要从中加载数据的数据集。
+- **batch_size** ([*int*](https://docs.python.org/3/library/functions.html#int)*,* *optional*) – 每个Batch中的样本数(default: `1`).
+- **shuffle** ([*bool*](https://docs.python.org/3/library/functions.html#bool)*,* *optional*) – 设置为 `True`来将每个epoch中的数据打乱 (default: `False`).
+- **sampler** ([*Sampler*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler) *or* *Iterable*,*optional*) – 定义从数据集中抽取样本的策略.可以是任何使用了 `__len__` 的 `Iterable` 。如果指定了此项，就不能再指定 `shuffle` 。
+- **batch_sampler** ([*Sampler*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler) *or* *Iterable**,* *optional*) – 类似于`sampler`, 但是每次返回一个batch的indices。 与 `batch_size`, `shuffle`, `sampler`, 以及 `drop_last`是相互排斥的。
+- **num_workers** ([*int*](https://docs.python.org/3/library/functions.html#int)*,* *optional*) –加载数据用的子进程数量. `0` 代表在主进程中加载数据 (default: `0`)
+- **collate_fn** (*callable,* *optional*) – 将一个列表中的样本排合并来生成一个mini-batch的Tensor(s). Used when using batched loading from 当在map-style 的数据集中使用批处理加载时使用。
+- **pin_memory** ([*bool*](https://docs.python.org/3/library/functions.html#bool)*,* *optional*) – 若为`True`, 数据加载器会在返回张量之前将其复制到CUDA固定内存中。如果数据元素是自定义类型，或者 `collate_fn`返回的是自定义类型的批，请参见下面的示例。
+- **drop_last** ([*bool*](https://docs.python.org/3/library/functions.html#bool)*,* *optional*) – 设置为 `True`时 ，如果数据集size不能被batch size整除，会丢弃最后一个不完整的batch。若为  `False` 数据集size不能被batch size整除,最后一个batch会比其他的小。 (default: `False`)
+- **timeout** (*numeric,* *optional*) –如果为正，则为从workers收集一批数据的超时的值. 永远为非负数. (default: `0`)
+- **worker_init_fn** (*callable,* *optional*) – 如果不是 `None`，在设置seed之后，加载数据之前，将会在每个具有id（`[0, num_workers - 1]`中的一个整数）子进程中调用，然后作为输入。 (default: `None`)
+
+***WARNING***
+
+- 若使用`spawn()`方法来启动子进程，则`worker_init_fn`不能为unpicklable对象（比如lambda函数）
+
+
+
+> <font color='red'>CLASS</font>  `torch.utils.data.Dataset`
+
+表示数据集的抽象类。
+
+所有表示从keys到数据样本的映射的数据集都应该继承此类。所有的子类都应该重写`__getitem__()`，支持给定一个key，获取对应的数据样本。子类也可以选择性地重写`__len__()`，这是通过许多Sampler实现和DataLoader的默认选项期望的返回的数据集的大小。
+
+***NOTE***
+
+`Dataloader`默认构建一个生成整数indices的index sampler，为使它在使用非整数indices/keys的map-style的数据集时也能工作，必须提供一个自定义的sampler。
+
+> <font color='red'>CLASS</font> ` torch.utils.data.IterableDataset`
+
+一个可迭代的数据集
+
+所有表示可迭代数据样本的数据集都应该继承此类.当数据来自流时，这种形式的数据集特别有用。
+
+所有的子类应该覆盖剩余的`iter__()`，这会返回这个数据集中样本的迭代器。
+
+当一个子类和DataLoader一起使用时,数据集中的每一项都将从DataLoader迭代器中生成。当`num_workers > 0`时，每个工作进程将拥有数据集对象的不同副本，因此通常需要独立配置每个副本，以避免从工作进程返回重复数据。`get_worker_info()`在工作进程中调用时，返回有关工作进程的信息。它可以用在数据集的`__iter__()`方法或`DataLoader`的`worker_init_fn`选项中来修改每个副本的行为。
+
+[examples](https://pytorch.org/docs/stable/data.html#torch.utils.data.IterableDataset)
+
+> <font color='red'>CLASS</font>  `torch.utils.data.TensorDataset`(**tensors*)
+
+包装tensors的数据集
+
+通过沿第一维索引张量来检索每个样本。
+
+**参数**
+
+- **tensors** ([*Tensor*](https://pytorch.org/docs/stable/tensors.html#torch.Tensor)) -- 和第一个维度size相同的tensors
+
+> <font color='red'>CLASS</font>  `torch.utils.data.ConcatDataset`(*datasets*)
+
+数据集是多个数据集的拼接。
+
+这个类用于组装不同的现有数据集。
+
+**参数**
+
+- **datasets** (*sequence*) -- 需要拼接的数据集的列表
+
+> <font color='red'>CLASS</font> ` torch.utils.data.ChainDataset`(*datasets*)
+
+用于链接多个IterableDataset的数据集。
+
+这个类对于组装现有的不同数据集流非常有用。链合操作是动态完成的，因此用这个类连接大型数据集将是有效的。
+
+**参数**
+
+- **datasets** (*iterable of IterableDataset*) -- 要链接在一起的数据集
+
+> <font color='red'>CLASS</font>  `torch.utils.data.Subset`(*dataset*, *indices*)
+
+指定了indices的子集
+
+**参数**
+
+- **dataset** ([*Dataset*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Dataset)) – The whole Dataset
+- **indices** (*sequence*) – 在整个数据集中为子集选择的索引
+
+> `torch.utils.data.get_worker_info`()
+
+返回关于当前DataLoader迭代器工作进程的信息。
+
+在一个worker中调用时,将返回一个保证具有以下属性的对象：
+
+- `id`：当前进程id
+- `num_workers`：进程数量
+- `seed`：当前worker的随机种子集。 这个值由主进程RNG和worker id决定。 See [`DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader)’s documentation for more details.
+- `dataset`：此进程中的数据集对象的副本注意，这是与主进程不同的进程中的另一个对象。
+
+***NOTE***
+
+在将 `worker_init_fn`传进 [`DataLoader`](https://pytorch.org/docs/stable/data.html#torch.utils.data.DataLoader)时，这种方法可以用于以不同的方式设置每个辅助进程。例如，使用`worker_id`将数据集对象配置为只读取分片数据集的特定部分，或者使用seed对数据集代码中使用的其他库进行seed.
+
+> `torch.utils.data.random_split`(*dataset*, *lengths*, *generator=<torch._C.Generator object>*)
+
+随机地将一个数据集分割成不重叠的给定长度的新数据集。generator是可选的，以生成可复写的结果，例如:
+
+```python
+>>> random_split(range(10), [3, 7], generator=torch.Generator().manual_seed(42))
+```
+
+**参数**
+
+- **dataset** ([*Dataset*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Dataset)) – 要分割的数据集
+- **lengths** (*sequence*) – 要产生的数据集的长度
+- **generator** ([*Generator*](https://pytorch.org/docs/stable/generated/torch.Generator.html#torch.Generator)) –用于随机排列的生成器
+
+> <font color='red'>CLASS</font>  `torch.utils.data.Sampler`(*data_source*)
+
+所有Sampler的基类。
+
+每个Sampler子类必须提供一个`__iter__()`方法，提供一种遍历数据集元素的indices的方法，以及一个`__len__()`方法，返回返回的迭代器的长度。
+
+`__iter__()`方法不是DataLoader严格要求的，但在涉及到DataLoader长度的任何计算中都是必需的。
+
+> <font color='red'>CLASS</font>  `torch.utils.data.SequentialSampler`(*data_source*)
+
+按顺序取样元素，总是按相同的顺序。
+
+**参数**
+
+- **data_source** ([*Dataset*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Dataset)) – 要进行取样的数据集
+
+> <font color='red'>CLASS</font>  `torch.utils.data.RandomSampler`(*data_source*, *replacement=False*, *num_samples=None*, *generator=None*)
+
+随机取样。如果`replacement`为False，则从一个打乱的数据集中采样。如果`replacement`为True，则用户可以指定要抽取的`num_samples`。
+
+**参数**
+
+- **data_source** ([*Dataset*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Dataset)) – 要进行取样的数据集
+- **replacement** ([*bool*](https://docs.python.org/3/library/functions.html#bool)) – 如果为True，抽取样品进行替换， default=``False``
+- **num_samples** ([*int*](https://docs.python.org/3/library/functions.html#int)) –要抽取的样本数, default=`len(dataset)`. 只有当 replacement为True时，才应该指定此参数
+- **generator** ([*Generator*](https://pytorch.org/docs/stable/generated/torch.Generator.html#torch.Generator)) – 用于采样的发生器。
+
+> <font color='red'>CLASS</font>  `torch.utils.data.SubsetRandomSampler`(*indices*, *generator=None*)
+
+从给定的索引列表中随机抽取元素，不进行替换。
+
+**参数**
+
+- **indices** (*sequence*) –indices 序列
+- **generator** ([*Generator*](https://pytorch.org/docs/stable/generated/torch.Generator.html#torch.Generator)) –  用于采样的发生器。
+
+> <font color='red'>CLASS</font>  `torch.utils.data.WeightedRandomSampler`(*weights*, *num_samples*, *replacement=True*, *generator=None*)
+
+对给定的概率(权重)从`[0,..,len(weights)-1]`中取样
+
+**参数**
+
+- **weights** (*sequence*) – 一组权值序列，不需要让它们的和为1
+- **num_samples** ([*int*](https://docs.python.org/3/library/functions.html#int)) – 要抽取的样本数
+- **replacement** ([*bool*](https://docs.python.org/3/library/functions.html#bool)) –如果为真，抽取样品进行替换。否则，不对样本进行替换，意味着当为某一行抽取样本索引时，将无法再次为该行抽取该索引。
+- **generator** ([*Generator*](https://pytorch.org/docs/stable/generated/torch.Generator.html#torch.Generator)) – 用于采样的发生器。
+
+Example
+
+```python
+>>> list(WeightedRandomSampler([0.1, 0.9, 0.4, 0.7, 3.0, 0.6], 5, replacement=True))
+[4, 4, 1, 4, 5]
+>>> list(WeightedRandomSampler([0.9, 0.4, 0.05, 0.2, 0.3, 0.1], 5, replacement=False))
+[0, 1, 4, 3, 2]
+```
+
+> <font color='red'>CLASS</font> `torch.utils.data.BatchSampler`(*sampler*, *batch_size*, *drop_last*)
+
+封装另一个采样器以生成一小批索引。
+
+**参数**
+
+- **sampler** ([*Sampler*](https://pytorch.org/docs/stable/data.html#torch.utils.data.Sampler) *or* *Iterable*) – 基础 sampler. 可以是使用了 `__len__` 的任何可迭代对象
+
+- **batch_size** ([*int*](https://docs.python.org/3/library/functions.html#int)) – Size of mini-batch.
+
+- **drop_last** ([*bool*](https://docs.python.org/3/library/functions.html#bool)) – 若 `True`, 如果最后一批的大小小于batch_size，采样器将删除它
+
+- Example
+
+  ```python
+  >>> list(BatchSampler(SequentialSampler(range(10)), batch_size=3, drop_last=False))
+  [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9]]
+  >>> list(BatchSampler(SequentialSampler(range(10)), batch_size=3, drop_last=True))
+  [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+  ```
+
+> <font color='red'>CLASS</font> `torch.utils.data.distributed.DistributedSampler`(*dataset*, *num_replicas=None*, *rank=None*, *shuffle=True*, *seed=0*)
+
+限制数据将其加载到数据集的一个子集的sampler。
+
+它与 [`torch.nn.parallel.DistributedDataParallel`](https://pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html#torch.nn.parallel.DistributedDataParallel)结合起来特别有用。在这种情况下，每个进程都可以将`torch.utils.data.DistributedSampler`类实例作为一个`DataLoader`的sampler进行传递，并加载其独占的原始数据集的子集。
+
+注意假设数据集的大小是恒定的。
+
+**参数**
+
+- **dataset** –要进行取样的数据集
+- **num_replicas** ([*int*](https://docs.python.org/3/library/functions.html#int)*,* *optional*) – 参与分布式训练的进程数量. By default, `rank` is retrieved from the current distributed group.
+- **rank** ([*int*](https://docs.python.org/3/library/functions.html#int)*,* *optional*) –当前进程在`num_replicas`的Rank，默认 `rank`从当前分布式组中检索
+- **shuffle** ([*bool*](https://docs.python.org/3/library/functions.html#bool)*,* *optional*) – If `True` (default), sampler 会打乱indices
+- **seed** ([*int*](https://docs.python.org/3/library/functions.html#int)*,* *optional*) – 在 `shuffle=True`时，用来打乱采样器的随机种子，这个数字在分布式组中的所有进程之间应该是相同的Default: `0`。
+
+在分布式模式下，在创建DataLoader迭代器之前，在每个epoch开始时调用`set_epoch(epoch) <set_epoch> `方法是必要的，这样可以使 shuffling在多个epoch之间正常工作。否则，将始终使用相同的顺序。
+
+Example:
+
+```python
+>>> sampler = DistributedSampler(dataset) if is_distributed else None
+>>> loader = DataLoader(dataset, shuffle=(sampler is None),
+...                     sampler=sampler)
+>>> for epoch in range(start_epoch, n_epochs):
+...     if is_distributed:
+...         sampler.set_epoch(epoch)
+...     train(loader)
+```
 
 # PART 2   TUTORIALS
 

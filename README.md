@@ -1,10 +1,10 @@
 <font color='red'>Pytorch版本：1.6.0</font>
 
-<font color='red'>上版更新：分布式训练，DDP(DistributedDataParallel)</font>
+<font color='red'>上版更新：nn.SyncBatchNorm</font>
 
-<font color='red'>当前更新：nn.SyncBatchNorm，dataSampler（更新中）</font>
+<font color='red'>当前更新：nn.utils.data</font>
 
-下载链接 https://github.com/liuzhaoo/Pytorch-API-and-Tutorials-CN/releases/tag/v0.01
+下载链接 https://github.com/liuzhaoo/Pytorch-API-and-Tutorials-CN/releases/tag/v0.03
 
 也可直接下载上方pdf文件
 
